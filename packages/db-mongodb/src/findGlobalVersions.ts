@@ -5,10 +5,10 @@ import { buildVersionGlobalFields, flattenWhereToOperators } from 'payload'
 
 import type { MongooseAdapter } from './index.js'
 
+import { getSession } from './getSession.js'
 import { buildSortParam } from './queries/buildSortParam.js'
 import { buildProjectionFromSelect } from './utilities/buildProjectionFromSelect.js'
-import { sanitizeInternalFields } from './utilities/sanitizeInternalFields.js'
-import { withSession } from './withSession.js'
+import { transform } from './utilities/transform.js'
 
 export const findGlobalVersions: FindGlobalVersions = async function findGlobalVersions(
   this: MongooseAdapter,
@@ -30,11 +30,6 @@ export const findGlobalVersions: FindGlobalVersions = async function findGlobalV
     this.payload.config,
     this.payload.globals.config.find(({ slug }) => slug === global),
   )
-  const options = {
-    ...(await withSession(this, req)),
-    limit,
-    skip,
-  }
 
   let hasNearConstraint = false
 
@@ -61,13 +56,17 @@ export const findGlobalVersions: FindGlobalVersions = async function findGlobalV
     where,
   })
 
+  const session = await getSession(this, req)
   // useEstimatedCount is faster, but not accurate, as it ignores any filters. It is thus set to true if there are no filters.
   const useEstimatedCount = hasNearConstraint || !query || Object.keys(query).length === 0
   const paginationOptions: PaginateOptions = {
     lean: true,
     leanWithId: true,
     limit,
-    options,
+    options: {
+      session,
+      skip,
+    },
     page,
     pagination,
     projection: buildProjectionFromSelect({ adapter: this, fields: versionFields, select }),
@@ -91,8 +90,8 @@ export const findGlobalVersions: FindGlobalVersions = async function findGlobalV
     paginationOptions.useCustomCountFn = () => {
       return Promise.resolve(
         Model.countDocuments(query, {
-          ...options,
           hint: { _id: 1 },
+          session,
         }),
       )
     }
@@ -110,13 +109,13 @@ export const findGlobalVersions: FindGlobalVersions = async function findGlobalV
   }
 
   const result = await Model.paginate(query, paginationOptions)
-  const docs = JSON.parse(JSON.stringify(result.docs))
 
-  return {
-    ...result,
-    docs: docs.map((doc) => {
-      doc.id = doc._id
-      return sanitizeInternalFields(doc)
-    }),
-  }
+  transform({
+    type: 'read',
+    adapter: this,
+    data: result.docs,
+    fields: versionFields,
+  })
+
+  return result
 }

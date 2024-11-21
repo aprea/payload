@@ -5,10 +5,10 @@ import { buildVersionCollectionFields, flattenWhereToOperators } from 'payload'
 
 import type { MongooseAdapter } from './index.js'
 
+import { getSession } from './getSession.js'
 import { buildSortParam } from './queries/buildSortParam.js'
 import { buildProjectionFromSelect } from './utilities/buildProjectionFromSelect.js'
-import { sanitizeInternalFields } from './utilities/sanitizeInternalFields.js'
-import { withSession } from './withSession.js'
+import { transform } from './utilities/transform.js'
 
 export const findVersions: FindVersions = async function findVersions(
   this: MongooseAdapter,
@@ -27,11 +27,8 @@ export const findVersions: FindVersions = async function findVersions(
 ) {
   const Model = this.versions[collection]
   const collectionConfig = this.payload.collections[collection].config
-  const options = {
-    ...(await withSession(this, req)),
-    limit,
-    skip,
-  }
+
+  const session = await getSession(this, req)
 
   let hasNearConstraint = false
 
@@ -57,18 +54,23 @@ export const findVersions: FindVersions = async function findVersions(
     where,
   })
 
+  const versionFields = buildVersionCollectionFields(this.payload.config, collectionConfig)
   // useEstimatedCount is faster, but not accurate, as it ignores any filters. It is thus set to true if there are no filters.
   const useEstimatedCount = hasNearConstraint || !query || Object.keys(query).length === 0
   const paginationOptions: PaginateOptions = {
     lean: true,
     leanWithId: true,
     limit,
-    options,
+    options: {
+      limit,
+      session,
+      skip,
+    },
     page,
     pagination,
     projection: buildProjectionFromSelect({
       adapter: this,
-      fields: buildVersionCollectionFields(this.payload.config, collectionConfig),
+      fields: versionFields,
       select,
     }),
     sort,
@@ -91,8 +93,8 @@ export const findVersions: FindVersions = async function findVersions(
     paginationOptions.useCustomCountFn = () => {
       return Promise.resolve(
         Model.countDocuments(query, {
-          ...options,
           hint: { _id: 1 },
+          session,
         }),
       )
     }
@@ -110,13 +112,13 @@ export const findVersions: FindVersions = async function findVersions(
   }
 
   const result = await Model.paginate(query, paginationOptions)
-  const docs = JSON.parse(JSON.stringify(result.docs))
 
-  return {
-    ...result,
-    docs: docs.map((doc) => {
-      doc.id = doc._id
-      return sanitizeInternalFields(doc)
-    }),
-  }
+  transform({
+    type: 'read',
+    adapter: this,
+    data: result.docs,
+    fields: versionFields,
+  })
+
+  return result
 }
